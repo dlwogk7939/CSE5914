@@ -7,14 +7,16 @@ from pathlib import Path
 from typing import Annotated
 
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, StringConstraints
 
 DB_PATH = Path(__file__).resolve().parents[1] / "nba.db"
-OLLAMA_URL = "http://localhost:11434/api/chat"
+load_dotenv(DB_PATH.parent / ".env")
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 MAX_STEPS, MAX_QUERIES, MAX_ROWS = 8, 8, 100
-QUERY_TIMEOUT, OLLAMA_TIMEOUT = 5, 120
+QUERY_TIMEOUT, GEMINI_TIMEOUT = 5, 120
 TABLES = {"teams", "players", "games", "box_scores", "season_totals"}
 
 app = FastAPI(title="AskNBA backend")
@@ -117,7 +119,7 @@ def tool_result(call):
         function = call["function"]
         if function["name"] != "query_sql":
             raise ValueError("The only available tool is query_sql.")
-        result = query_sql(function["arguments"]["sql"])
+        result = query_sql(json.loads(function["arguments"])["sql"])
         return json.dumps(result)
     except (KeyError, TypeError, ValueError) as error:
         return json.dumps({"error": f"Invalid tool call: {error}"})
@@ -130,22 +132,23 @@ def health():
 
 @app.post("/ask", response_model=Answer)
 def ask(request: Question):
-    model = os.environ.get("OLLAMA_MODEL", "").strip()
-    if not model:
-        raise HTTPException(503, "Set OLLAMA_MODEL to the exact name of a local model that supports tools.")
+    api_key = os.environ.get("API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(503, "Set API_KEY in the repository's .env file to your Gemini API key.")
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
     try:
         messages = [
             {"role": "system", "content": system_prompt()},
             {"role": "user", "content": request.question},
         ]
         queries = 0
-        with httpx.Client(timeout=OLLAMA_TIMEOUT, trust_env=False) as client:
+        with httpx.Client(timeout=GEMINI_TIMEOUT, trust_env=False) as client:
             for _ in range(MAX_STEPS):
-                response = client.post(OLLAMA_URL, json={
+                response = client.post(GEMINI_URL, headers={"Authorization": f"Bearer {api_key}"}, json={
                     "model": model, "messages": messages, "tools": TOOLS, "stream": False,
                 })
                 response.raise_for_status()
-                message = response.json()["message"]
+                message = response.json()["choices"][0]["message"]
                 if not isinstance(message, dict) or message.get("role") != "assistant":
                     raise ValueError("Expected an assistant message.")
                 messages.append(message)
@@ -162,16 +165,18 @@ def ask(request: Question):
                     if queries > MAX_QUERIES:
                         raise HTTPException(504, "The model exceeded the SQL query limit.")
                     messages.append({
-                        "role": "tool", "tool_name": "query_sql", "content": tool_result(call),
+                        "role": "tool", "name": call["function"]["name"],
+                        "tool_call_id": call["id"], "content": tool_result(call),
                     })
         raise HTTPException(504, "The model exceeded the query loop step limit.")
     except httpx.TimeoutException as error:
-        raise HTTPException(504, "Ollama timed out.") from error
+        raise HTTPException(504, "Gemini timed out.") from error
     except httpx.HTTPStatusError as error:
-        raise HTTPException(502, f"Ollama rejected the request: {error.response.text[:500]}") from error
+        detail = error.response.text.replace(api_key, "[redacted]")[:500]
+        raise HTTPException(429 if error.response.status_code == 429 else 502, f"Gemini rejected the request: {detail}") from error
     except httpx.RequestError as error:
-        raise HTTPException(503, "Cannot reach local Ollama. Start it with ollama serve.") from error
+        raise HTTPException(503, "Cannot reach the Gemini API.") from error
     except sqlite3.Error as error:
         raise HTTPException(503, f"Cannot read nba.db: {error}") from error
-    except (KeyError, TypeError, ValueError, AttributeError) as error:
-        raise HTTPException(502, f"Invalid Ollama response: {error}") from error
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError) as error:
+        raise HTTPException(502, f"Invalid Gemini response: {error}") from error

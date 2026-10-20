@@ -16,7 +16,9 @@ from backend import main
 def sql_message(*queries):
     return {
         "role": "assistant", "content": "",
-        "tool_calls": [{"function": {"name": "query_sql", "arguments": {"sql": sql}}} for sql in queries],
+        "tool_calls": [{"id": f"call-{i}", "type": "function", "function": {
+            "name": "query_sql", "arguments": json.dumps({"sql": sql}),
+        }} for i, sql in enumerate(queries)],
     }
 
 
@@ -35,7 +37,7 @@ class BackendTests(unittest.TestCase):
                 INSERT INTO players VALUES (1, 'Player One', 1), (2, 'Player Two', 2);
                 INSERT INTO season_totals VALUES (1, 2026, 10, 30.0), (2, 2026, 20, 25.0);
             """)
-        for replacement in (patch.object(main, "DB_PATH", database), patch.dict(os.environ, OLLAMA_MODEL="test-model")):
+        for replacement in (patch.object(main, "DB_PATH", database), patch.dict(os.environ, API_KEY="test-api-key", GEMINI_MODEL="test-model")):
             replacement.start()
             self.addCleanup(replacement.stop)
 
@@ -49,16 +51,17 @@ class BackendTests(unittest.TestCase):
         requests = []
 
         def handler(request):
-            self.assertEqual(str(request.url), main.OLLAMA_URL)
+            self.assertEqual(str(request.url), main.GEMINI_URL)
+            self.assertEqual(request.headers["Authorization"], "Bearer test-api-key")
             requests.append(json.loads(request.content))
             reply = replies[len(requests) - 1]
             if isinstance(reply, Exception):
                 raise reply
-            status, body = reply if isinstance(reply, tuple) else (200, {"message": reply})
+            status, body = reply if isinstance(reply, tuple) else (200, {"choices": [{"message": reply}]})
             return httpx.Response(status, json=body)
 
-        ollama = httpx.Client(transport=httpx.MockTransport(handler))
-        with patch.object(main.httpx, "Client", return_value=ollama):
+        gemini = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(main.httpx, "Client", return_value=gemini):
             response = self.request("POST", "/ask", json={"question": question})
         return response, requests
 
@@ -86,6 +89,18 @@ class BackendTests(unittest.TestCase):
         self.assertIn("unknown_column", json.loads(requests[1]["messages"][-1]["content"])["error"])
         self.assertEqual(json.loads(requests[2]["messages"][-1]["content"])["rows"], [[30.0]])
 
+    def test_default_model_and_thought_signature(self):
+        message = sql_message("SELECT 1")
+        message["tool_calls"][0]["extra_content"] = {"google": {"thought_signature": "test-signature"}}
+        with patch.dict(os.environ):
+            os.environ.pop("GEMINI_MODEL", None)
+            response, requests = self.invoke([message, {"role": "assistant", "content": "Done."}])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(requests[0]["model"], "gemini-3.5-flash-lite")
+        self.assertEqual(requests[1]["messages"][2], message)
+        self.assertEqual(requests[1]["messages"][-1]["tool_call_id"], "call-0")
+        self.assertEqual(requests[1]["messages"][-1]["name"], "query_sql")
+
     def test_multiple_tool_calls_in_one_turn(self):
         response, requests = self.invoke([
             sql_message("SELECT COUNT(*) FROM players", "SELECT MAX(ppg) FROM season_totals"),
@@ -94,15 +109,17 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         results = [json.loads(message["content"])["rows"] for message in requests[1]["messages"] if message["role"] == "tool"]
         self.assertEqual(results, [[[2]], [[30.0]]])
+        self.assertEqual([message["tool_call_id"] for message in requests[1]["messages"] if message["role"] == "tool"], ["call-0", "call-1"])
 
     def test_invalid_tool_call_is_returned_for_retry(self):
-        response, requests = self.invoke([
-            {"role": "assistant", "tool_calls": [{"function": {"name": "query_sql", "arguments": {}}}]},
-            {"role": "assistant", "content": "Please clarify the season."},
-        ])
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("error", json.loads(requests[1]["messages"][-1]["content"]))
-        self.assertIn("error", json.loads(main.tool_result({"function": {"name": "other", "arguments": {}}})))
+        for arguments in ("{}", "{", "null"):
+            with self.subTest(arguments=arguments):
+                message = sql_message("SELECT 1")
+                message["tool_calls"][0]["function"]["arguments"] = arguments
+                response, requests = self.invoke([message, {"role": "assistant", "content": "Please clarify the season."}])
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("error", json.loads(requests[1]["messages"][-1]["content"]))
+        self.assertIn("error", json.loads(main.tool_result({"function": {"name": "other", "arguments": "{}"}})))
 
     def test_queries_are_read_only_and_single_statement(self):
         for sql in (
@@ -155,26 +172,35 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(requests[0]["messages"][1]["content"], "Player One?")
 
-    def test_missing_model_and_database(self):
-        with patch.dict(os.environ, OLLAMA_MODEL=""):
+    def test_missing_key_and_database(self):
+        with patch.dict(os.environ, API_KEY=""):
             self.assertEqual(self.request("POST", "/ask", json={"question": "Player One?"}).status_code, 503)
         missing = main.DB_PATH.parent / "missing.db"
         with patch.object(main, "DB_PATH", missing):
             self.assertEqual(self.request("POST", "/ask", json={"question": "Player One?"}).status_code, 503)
         self.assertFalse(missing.exists())
 
-    def test_ollama_failures(self):
+    def test_gemini_failures(self):
         for reply, status in (
             (httpx.ConnectError("unavailable"), 503),
             (httpx.ReadTimeout("too slow"), 504),
             ((400, {"error": "model does not support tools"}), 502),
+            ((429, {"error": "quota exceeded"}), 429),
             ((200, {"missing": "message"}), 502),
+            ((200, {"choices": []}), 502),
             ({"role": "assistant", "content": ""}, 502),
+            ({"role": "assistant", "content": None}, 502),
         ):
             with self.subTest(reply=reply):
                 response, requests = self.invoke([reply])
                 self.assertEqual(response.status_code, status)
                 self.assertEqual(len(requests), 1)
+
+    def test_api_key_is_redacted_from_errors(self):
+        response, _ = self.invoke([(403, {"error": "Rejected test-api-key"})])
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn("test-api-key", response.text)
+        self.assertIn("[redacted]", response.json()["detail"])
 
     def test_vite_cors(self):
         response = self.request("OPTIONS", "/ask", headers={

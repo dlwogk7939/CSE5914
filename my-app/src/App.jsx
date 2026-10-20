@@ -2,8 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import './App.css'
 
 const KEY = 'historykey'
-const PLACEHOLDER_ANSWER =
-  'This is a sample placeholder answer. In the future, the question response will appear here.'
 const prompts = [
   ['LEAGUE LEADERS', 'Who led the NBA in assists in 2025?'],
   ['PLAYER COMPARISONS', 'Compare LeBron and Curry since 2015'],
@@ -74,11 +72,6 @@ function load() {
               typeof x.answer === 'string',
           )
           .slice(0, 100)
-          .map((item) => ({
-            ...item,
-            answer: PLACEHOLDER_ANSWER,
-            sample: true,
-          }))
       : []
   } catch {
     return []
@@ -123,16 +116,26 @@ export default function App() {
     setError('')
     setMenu(false)
     try {
-      const answer = PLACEHOLDER_ANSWER
-      const sample = true
-      const entry = { id: crypto.randomUUID(), question: text, answer, sample }
+      const response = await fetch('http://127.0.0.1:8000/ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: text }),
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        throw new Error(typeof data.detail === 'string' ? data.detail : 'Unable to answer this question. Please try again.')
+      }
+      if (typeof data.answer !== 'string' || !data.answer.trim()) {
+        throw new Error('The backend returned an empty answer. Please try again.')
+      }
+      const entry = { id: crypto.randomUUID(), question: text, answer: data.answer }
       setHistory((h) => [entry, ...h].slice(0, 100))
       setActiveId(entry.id)
       setQuestion('')
     } catch (e) {
       setError(
-        e.name === 'AbortError'
-          ? 'The request timed out. Please try again.'
+        e instanceof TypeError
+          ? 'Cannot reach the backend. Make sure it is running on port 8000.'
           : e.message,
       )
     } finally {

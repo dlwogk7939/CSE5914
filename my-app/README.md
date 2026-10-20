@@ -2,13 +2,17 @@
 
 Minimal React + Vite NBA question interface. Questions and answers are saved in browser, capped at 100 entries. Clear history removes local browser data.
 
-When running for the first time, first run `npm install` 
+From `my-app`, run `npm install` the first time, then `npm run dev`.
+Open `http://localhost:5173`.
 
-Run normally with `npm run dev`
+Start the FastAPI backend separately on port 8000 following [backend setup](../backend/README.md).
+It loads `API_KEY` from the repository-root `.env` and uses Gemini 3.5 Flash-Lite by default.
 
 ## Answers
 
-For now, every response is hardcoded as "This is a sample placeholder answer. In the future, the question response will appear here."
+Questions are sent to `http://127.0.0.1:8000/ask` as `{"question":"..."}`.
+The returned answer is displayed and saved in browser history. Failed requests display an error
+without adding a history entry. Questions are independent; history is not sent to the backend.
 
 Suggested questions are also hardcoded.
 
