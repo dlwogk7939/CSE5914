@@ -15,6 +15,11 @@ from pydantic import BaseModel, StringConstraints
 DB_PATH = Path(__file__).resolve().parents[1] / "nba.db"
 load_dotenv(DB_PATH.parent / ".env")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+GEMINI_MODELS = {
+    "gemini-3.8-flash": "Gemini 3.8 Flash",
+    "gemini-3.5-flash-lite": "Gemini 3.5 Flash-Lite",
+    "gemini-3.1-flash-lite": "Gemini 3.1 Flash-Lite"
+}
 MAX_STEPS, MAX_QUERIES, MAX_ROWS = 8, 8, 100
 QUERY_TIMEOUT, GEMINI_TIMEOUT = 5, 120
 TABLES = {"teams", "players", "games", "box_scores", "season_totals"}
@@ -23,17 +28,29 @@ app = FastAPI(title="AskNBA backend")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_methods=["POST"],
+    allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
 
 
 class Question(BaseModel):
     question: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
+    model: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)] | None = None
 
 
 class Answer(BaseModel):
     answer: str
+    model: str
+    model_label: str
+
+
+@app.get("/models")
+def models():
+    default = os.environ.get("GEMINI_MODEL", "").strip() or "gemini-3.5-flash-lite"
+    # Preserve an administrator's configured default alongside the curated choices.
+    choices = {**GEMINI_MODELS}
+    choices.setdefault(default, default)
+    return {"default": default, "models": [{"id": key, "label": label} for key, label in choices.items()]}
 
 
 TOOLS = [{
@@ -132,10 +149,14 @@ def health():
 
 @app.post("/ask", response_model=Answer)
 def ask(request: Question):
+    catalog = models()
+    model = request.model if request.model is not None else catalog["default"]
+    selected = next((item for item in catalog["models"] if item["id"] == model), None)
+    if selected is None:
+        raise HTTPException(422, "Choose a supported Gemini model from /models.")
     api_key = os.environ.get("API_KEY", "").strip()
     if not api_key:
         raise HTTPException(503, "Set API_KEY in the repository's .env file to your Gemini API key.")
-    model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
     try:
         messages = [
             {"role": "system", "content": system_prompt()},
@@ -159,7 +180,7 @@ def ask(request: Question):
                     answer = message.get("content", "").strip()
                     if not answer:
                         raise ValueError("The model returned an empty answer.")
-                    return {"answer": answer}
+                    return {"answer": answer, "model": model, "model_label": selected["label"]}
                 for call in calls:
                     queries += 1
                     if queries > MAX_QUERIES:

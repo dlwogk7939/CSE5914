@@ -22,6 +22,11 @@ API_KEY=YOUR_GEMINI_API_KEY
 ```
 
 The default model is `gemini-3.5-flash-lite`. Optionally set `GEMINI_MODEL` in `.env` to change it.
+The frontend's Model dropdown offers Gemini 3.5 Flash-Lite, Gemini 3.1 Flash-Lite, and Gemini 3.8 Flash,
+plus a custom `GEMINI_MODEL` default if configured. All choices use the same backend `API_KEY`.
+The browser remembers the selected model and labels new answers with the model that generated them.
+Google currently lists free-tier access for the three built-in models; actual access and quotas depend
+on your Google project and billing tier. See [pricing](https://ai.google.dev/gemini-api/docs/pricing).
 Existing environment variables take precedence over `.env`. The key stays on the backend;
 `.env` is ignored by Git. Restart the backend after changing `.env`.
 
@@ -40,7 +45,13 @@ curl http://127.0.0.1:8000/ask \
   -d '{"question":"What did Nikola Jokic average in 2025-26?"}'
 ```
 
-The response is `{"answer":"..."}`. Errors use FastAPI's `{"detail":"..."}` response.
+`GET /models` returns `{ "default": "...", "models": [{ "id": "...", "label": "..." }] }`.
+It lists supported choices without contacting Google or exposing credentials; it does not verify quota.
+`POST /ask` accepts an optional `model` from this list:
+`{"question":"Who led in assists in 2025-26?","model":"gemini-3.8-flash"}`.
+Omitting `model` preserves the configured backend default. Unknown models return HTTP 422.
+The response is `{"answer":"...","model":"...","model_label":"..."}`.
+Errors use FastAPI's `{"detail":"..."}` response. A failed model request does not silently switch models.
 Questions must contain 1–4,000 characters after trimming whitespace. Each question is independent;
 the frontend keeps its existing local history. Run `npm install` once, then `npm run dev` from
 `my-app` to use the connected frontend. CORS allows Vite at localhost/127.0.0.1 port 5173.

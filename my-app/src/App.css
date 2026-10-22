@@ -160,6 +160,22 @@ header > div {
   color: #92978d;
   font-weight: 500;
 }
+.model-picker { min-width: 0; }
+.model-picker label { font-size: 12px; }
+.model-picker select {
+  min-width: 0;
+  max-width: min(300px, 60vw);
+  padding: 10px 12px;
+  border: 1px solid #dddfd8;
+  border-radius: 8px;
+  background: #fff;
+  color: #505848;
+  font: inherit;
+}
+.model-picker select:focus-visible {
+  outline: 2px solid #dd783f;
+  outline-offset: 2px;
+}
 .workspace {
   width: min(760px, calc(100% - 88px));
   margin: auto;

@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import './App.css'
 
 const KEY = 'historykey'
+const MODEL_KEY = 'asknba-gemini-model'
 const markdownComponents = {
   table: ({ children }) => (
     <div className="answer-table" role="region" aria-label="Statistics table" tabIndex={0}>
@@ -97,9 +98,39 @@ export default function App() {
   const [error, setError] = useState('')
   const [menu, setMenu] = useState(false)
   const [storageError, setStorageError] = useState(false)
+  const [models, setModels] = useState([])
+  const [model, setModel] = useState('')
+  const [modelsLoading, setModelsLoading] = useState(true)
+  const [modelsError, setModelsError] = useState('')
+  const [catalogAttempt, setCatalogAttempt] = useState(0)
 
   const input = useRef(null)
   const active = history.find((x) => x.id === activeId)
+  const canAsk = !modelsLoading && !modelsError && models.some((item) => item.id === model)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    async function loadModels() {
+      try {
+        const response = await fetch('http://127.0.0.1:8000/models', { signal: controller.signal })
+        if (!response.ok) throw new Error('Could not load models.')
+        const data = await response.json()
+        if (!Array.isArray(data.models) || !data.models.length ||
+            !data.models.every((item) => typeof item.id === 'string' && typeof item.label === 'string') ||
+            !data.models.some((item) => item.id === data.default)) throw new Error('Invalid model list.')
+        let saved
+        try { saved = localStorage.getItem(MODEL_KEY) } catch { /* Storage is optional. */ }
+        setModels(data.models)
+        setModel(data.models.some((item) => item.id === saved) ? saved : data.default)
+      } catch {
+        if (!controller.signal.aborted) setModelsError('Cannot load Gemini models.')
+      } finally {
+        if (!controller.signal.aborted) setModelsLoading(false)
+      }
+    }
+    loadModels()
+    return () => controller.abort()
+  }, [catalogAttempt])
 
   useEffect(() => {
     try {
@@ -122,7 +153,7 @@ export default function App() {
   // Ask question
   async function ask(text) {
     text = text.trim()
-    if (!text || pending) return
+    if (!text || pending || !canAsk) return
     setPending(true)
     setError('')
     setMenu(false)
@@ -130,7 +161,7 @@ export default function App() {
       const response = await fetch('http://127.0.0.1:8000/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: text }),
+        body: JSON.stringify({ question: text, model }),
       })
       const data = await response.json()
       if (!response.ok) {
@@ -139,7 +170,8 @@ export default function App() {
       if (typeof data.answer !== 'string' || !data.answer.trim()) {
         throw new Error('The backend returned an empty answer. Please try again.')
       }
-      const entry = { id: crypto.randomUUID(), question: text, answer: data.answer }
+      const entry = { id: crypto.randomUUID(), question: text, answer: data.answer,
+        model: data.model, modelLabel: data.model_label }
       setHistory((h) => [entry, ...h].slice(0, 100))
       setActiveId(entry.id)
       setQuestion('')
@@ -243,6 +275,17 @@ export default function App() {
               ☰
             </button>
           </div>
+          <div className="model-picker">
+            <label htmlFor="gemini-model">Model</label>
+            <select id="gemini-model" value={model} disabled={pending || modelsLoading || !!modelsError}
+              onChange={(event) => {
+                setModel(event.target.value)
+                try { localStorage.setItem(MODEL_KEY, event.target.value) } catch { /* Storage is optional. */ }
+              }}>
+              {!model && <option value="">{modelsLoading ? 'Loading models…' : 'Models unavailable'}</option>}
+              {models.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+            </select>
+          </div>
         </header>
         <div className={`workspace ${active || pending ? 'has-answer' : ''}`}>
           {!active && !pending && (
@@ -280,11 +323,18 @@ export default function App() {
               disabled={pending}
               autoComplete="off"
             />
-            <button disabled={!question.trim() || pending}>
+            <button disabled={!question.trim() || pending || !canAsk}>
               {pending ? 'Asking…' : 'Ask'}
               {!pending && <Arrow />}
             </button>
           </form>
+          {modelsError && <p className="error" role="alert">{modelsError}{' '}
+            <button type="button" onClick={() => {
+              setModelsLoading(true)
+              setModelsError('')
+              setCatalogAttempt((attempt) => attempt + 1)
+            }}>Retry</button>
+          </p>}
           {error && (
             <p className="error" role="alert">
               {error}
@@ -300,6 +350,7 @@ export default function App() {
                 <div className="answer-heading">
                   <Ball size={21} />
                   <strong>AskNBA</strong>
+                  {typeof active.modelLabel === 'string' && <span>{active.modelLabel}</span>}
                   {active.sample && <span>Sample response</span>}
                 </div>
                 <div className="answer-content">
@@ -323,7 +374,7 @@ export default function App() {
                     className="suggestion"
                     key={text}
                     onClick={() => ask(text)}
-                    disabled={pending}
+                    disabled={pending || !canAsk}
                   >
                     {text}
                   </button>

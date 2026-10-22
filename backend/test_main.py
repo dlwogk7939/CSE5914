@@ -47,7 +47,7 @@ class BackendTests(unittest.TestCase):
                 return await client.request(method, path, **kwargs)
         return asyncio.run(send())
 
-    def invoke(self, replies, question="What did Player One average in 2025-26?"):
+    def invoke(self, replies, question="What did Player One average in 2025-26?", model=None):
         requests = []
 
         def handler(request):
@@ -62,8 +62,46 @@ class BackendTests(unittest.TestCase):
 
         gemini = httpx.Client(transport=httpx.MockTransport(handler))
         with patch.object(main.httpx, "Client", return_value=gemini):
-            response = self.request("POST", "/ask", json={"question": question})
+            payload = {"question": question}
+            if model is not None:
+                payload["model"] = model
+            response = self.request("POST", "/ask", json=payload)
         return response, requests
+
+    def test_model_catalog_and_custom_default(self):
+        response = self.request("GET", "/models")
+        self.assertEqual(response.status_code, 200)
+        catalog = response.json()
+        self.assertEqual(catalog["default"], "test-model")
+        self.assertEqual({item["id"] for item in catalog["models"]}, {*main.GEMINI_MODELS, "test-model"})
+        self.assertNotIn("test-api-key", response.text)
+        with patch.dict(os.environ, GEMINI_MODEL=" "):
+            self.assertEqual(self.request("GET", "/models").json()["default"], "gemini-3.5-flash-lite")
+
+    def test_selected_models_are_used_throughout_tool_loop(self):
+        for model, label in main.GEMINI_MODELS.items():
+            with self.subTest(model=model):
+                message = sql_message("SELECT ppg FROM season_totals WHERE player_id = 1")
+                message["tool_calls"][0]["extra_content"] = {"google": {"thought_signature": "signature"}}
+                response, requests = self.invoke([message, {"role": "assistant", "content": "30.0 points."}], model=model)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual([body["model"] for body in requests], [model, model])
+                self.assertEqual(requests[1]["messages"][2], message)
+                self.assertEqual(json.loads(requests[1]["messages"][-1]["content"])["rows"], [[30.0]])
+                self.assertEqual(response.json()["model"], model)
+                self.assertEqual(response.json()["model_label"], label)
+
+    def test_unlisted_and_invalid_models_are_rejected_before_api_call(self):
+        with patch.object(main.httpx, "Client") as client:
+            for model in ("unknown-model", "", " ", 123, "x" * 201):
+                with self.subTest(model=model):
+                    response = self.request("POST", "/ask", json={"question": "Stats?", "model": model})
+                    self.assertEqual(response.status_code, 422)
+            client.assert_not_called()
+
+    def test_model_catalog_get_cors(self):
+        response = self.request("GET", "/models", headers={"Origin": "http://localhost:5173"})
+        self.assertEqual(response.headers["access-control-allow-origin"], "http://localhost:5173")
 
     def test_lookup_then_stats_then_answer(self):
         response, requests = self.invoke([
