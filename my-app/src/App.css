@@ -370,14 +370,52 @@ footer {
   padding: 5px 8px;
   border-radius: 4px;
 }
-.answer p {
+.answer-content {
   font-size: 16px;
-  line-height: 1.85;
+  line-height: 1.75;
   color: #606855;
-  margin: 20px 0 0;
-  white-space: pre-wrap;
+  margin-top: 22px;
   overflow-wrap: anywhere;
 }
+.answer-content > :first-child { margin-top: 0; }
+.answer-content > :last-child { margin-bottom: 0; }
+.answer-content p { margin: 0 0 16px; }
+.answer-content :is(h2, h3, h4, h5, h6) {
+  color: #30372c;
+  font-size: 18px;
+  line-height: 1.4;
+  font-weight: 650;
+  margin: 28px 0 14px;
+  letter-spacing: -0.2px;
+}
+.answer-content h2 { font-size: 22px; }
+.answer-content strong { color: #30372c; font-weight: 650; }
+.answer-content :is(ul, ol) { padding-left: 24px; margin: 12px 0 20px; }
+.answer-content li { padding-left: 3px; margin: 8px 0; }
+.answer-content li::marker { color: #c45b2c; }
+.answer-content li p { margin-bottom: 8px; }
+.answer-content hr { border: 0; border-top: 1px solid #e5e7df; margin: 26px 0; }
+.answer-table {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 16px 0 24px;
+  border: 1px solid #e1e5da;
+  border-radius: 9px;
+  background: #fff;
+}
+.answer-table:focus-visible { outline: 2px solid #d76029; outline-offset: 3px; }
+.answer-table table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.5; }
+.answer-table :is(th, td) { padding: 12px 16px; text-align: left; border-bottom: 1px solid #e8ebe3; min-width: 100px; }
+.answer-table th { background: #f1f3ec; color: #454e3d; font-weight: 650; }
+.answer-table tbody tr:nth-child(even) { background: #fafbf8; }
+.answer-table tbody tr:last-child td { border-bottom: 0; }
+.answer-table td { font-variant-numeric: tabular-nums; }
+.answer-content a { color: #ad4b22; text-underline-offset: 3px; }
+.answer-content blockquote { margin: 20px 0; padding: 4px 18px; border-left: 3px solid #df986f; }
+.answer-content blockquote p:last-child { margin-bottom: 0; }
+.answer-content code { font-size: 0.88em; background: #eff1e9; padding: 2px 5px; border-radius: 4px; }
+.answer-content pre { overflow-x: auto; padding: 16px; background: #eff1e9; border-radius: 8px; }
+.answer-content pre code { padding: 0; }
 .error {
   font-size: 14px;
   color: #b43b20;
@@ -511,7 +549,7 @@ footer {
   .answer {
     padding: 20px;
   }
-  .answer p {
+  .answer-content {
     font-size: 15px;
   }
   .mobile-break {

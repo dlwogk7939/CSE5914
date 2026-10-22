@@ -1,7 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import './App.css'
 
 const KEY = 'historykey'
+const markdownComponents = {
+  table: ({ children }) => (
+    <div className="answer-table" role="region" aria-label="Statistics table" tabIndex={0}>
+      <table>{children}</table>
+    </div>
+  ),
+  h1: ({ children }) => <h2>{children}</h2>,
+  img: () => null,
+}
 const prompts = [
   ['LEAGUE LEADERS', 'Who led the NBA in assists in 2025?'],
   ['PLAYER COMPARISONS', 'Compare LeBron and Curry since 2015'],
@@ -291,7 +302,11 @@ export default function App() {
                   <strong>AskNBA</strong>
                   {active.sample && <span>Sample response</span>}
                 </div>
-                <p>{active.answer}</p>
+                <div className="answer-content">
+                  <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents} skipHtml>
+                    {active.answer}
+                  </Markdown>
+                </div>
               </article>
             </section>
           )}
