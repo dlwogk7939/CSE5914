@@ -5,6 +5,7 @@ import './App.css'
 
 const KEY = 'historykey'
 const MODEL_KEY = 'asknba-gemini-model'
+const API_BASE = `${import.meta.env.BASE_URL}api`
 const markdownComponents = {
   table: ({ children }) => (
     <div className="answer-table" role="region" aria-label="Statistics table" tabIndex={0}>
@@ -112,7 +113,7 @@ export default function App() {
     const controller = new AbortController()
     async function loadModels() {
       try {
-        const response = await fetch('http://127.0.0.1:8000/models', { signal: controller.signal })
+        const response = await fetch(`${API_BASE}/models`, { signal: controller.signal })
         if (!response.ok) throw new Error('Could not load models.')
         const data = await response.json()
         if (!Array.isArray(data.models) || !data.models.length ||
@@ -158,7 +159,7 @@ export default function App() {
     setError('')
     setMenu(false)
     try {
-      const response = await fetch('http://127.0.0.1:8000/ask', {
+      const response = await fetch(`${API_BASE}/ask`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question: text, model }),
@@ -178,7 +179,7 @@ export default function App() {
     } catch (e) {
       setError(
         e instanceof TypeError
-          ? 'Cannot reach the backend. Make sure it is running on port 8000.'
+          ? 'Cannot reach the backend. Please try again shortly.'
           : e.message,
       )
     } finally {

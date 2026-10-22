@@ -1,0 +1,14 @@
+*
+!backend/
+!backend/main.py
+!backend/requirements.txt
+!nba.db
+!my-app/
+!my-app/package.json
+!my-app/package-lock.json
+!my-app/index.html
+!my-app/vite.config.js
+!my-app/src/
+!my-app/src/**
+!my-app/public/
+!my-app/public/**
