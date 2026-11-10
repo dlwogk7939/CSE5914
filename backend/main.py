@@ -131,8 +131,29 @@ Use box_scores.team_id for the team a player represented in a particular game.
 box_scores.plus_minus is unavailable through season=2008; those zeroes represent missing data.
 Do not claim all-time records outside the available coverage. Resolve player names to player_id
 with a lookup query before querying their stats. Keep the final answer concise and name the season.
-"""
 
+After answering the user's question, generate 3 suggested follow-up questions.
+
+Suggestions should:
+- Be directly related to the original question and its answer.
+- Encourage further exploration of NBA statistics.
+- Be specific and answerable using the available database.
+- Avoid repeating the original question.
+- Include comparisons, player rankings, season statistics, or historical trends when relevant.
+
+Return your response in the following JSON format:
+
+{
+    "answer": "Your answer to the original question.",
+    "suggestions": [
+        "Suggested question 1?",
+        "Suggested question 2?",
+        "Suggested question 3?"
+    ]
+}
+
+Always return valid JSON. Do not include Markdown code blocks around the JSON.
+"""
 
 def authorize(action, table, function, database, trigger):
     allowed = (
