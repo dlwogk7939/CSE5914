@@ -52,8 +52,8 @@ It lists supported choices without contacting Google or exposing credentials; it
 Omitting `model` preserves the configured backend default. Unknown models return HTTP 422.
 The response is `{"answer":"...","model":"...","model_label":"..."}`.
 Errors use FastAPI's `{"detail":"..."}` response. A failed model request does not silently switch models.
-Questions must contain 1–4,000 characters after trimming whitespace. Each question is independent;
-the frontend keeps its existing local history. Run `npm install` once, then `npm run dev` from
+Questions must contain 1–4,000 characters after trimming whitespace. An optional `history` array contains previous `{ "question": "...", "answer": "..." }` turns in chronological order (up to 100 turns, 4,000 characters per question and 20,000 per answer). The backend forwards those turns before the new question; omitted history starts an independent conversation.
+The frontend saves separate chats locally, restores the selected chat after refresh, and shows all questions and answers. Existing single-question records become separate chats. New chat starts with empty context. Each chat supports 100 questions; prior answers sent as context are capped at 20,000 characters, while the displayed answers remain intact. Run `npm install` once, then `npm run dev` from
 `my-app` to use the connected frontend. CORS allows Vite at localhost/127.0.0.1 port 5173.
 
 ## Limits and data

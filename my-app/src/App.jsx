@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import './App.css'
 
 const KEY = 'historykey'
+const ACTIVE_KEY = 'asknba-active-chat'
 const MODEL_KEY = 'asknba-gemini-model'
 const API_BASE = `${import.meta.env.BASE_URL}api`
 const markdownComponents = {
@@ -80,11 +81,11 @@ function load() {
       ? h
           .filter(
             (x) =>
-              typeof x.id === 'string' &&
+              x && typeof x.id === 'string' &&
               typeof x.question === 'string' &&
               typeof x.answer === 'string',
           )
-          .slice(0, 100)
+          .map((x) => ({ ...x, conversationId: x.conversationId || x.id }))
       : []
   } catch {
     return []
@@ -93,7 +94,9 @@ function load() {
 
 export default function App() {
   const [history, setHistory] = useState(load)
-  const [activeId, setActiveId] = useState(null)
+  const [activeId, setActiveId] = useState(() => {
+    try { return localStorage.getItem(ACTIVE_KEY) } catch { return null }
+  })
   const [question, setQuestion] = useState('')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
@@ -106,7 +109,23 @@ export default function App() {
   const [catalogAttempt, setCatalogAttempt] = useState(0)
 
   const input = useRef(null)
-  const active = history.find((x) => x.id === activeId)
+  const turns = history.filter((x) => x.conversationId === activeId).slice().reverse()
+  const active = turns.at(-1)
+  const chats = [...new Set(history.map((x) => x.conversationId))].map((id) => {
+    const entries = history.filter((x) => x.conversationId === id)
+    return { id, title: entries.at(-1).question, count: entries.length }
+  })
+  const bottom = useRef(null)
+  const [pendingQuestion, setPendingQuestion] = useState('')
+  useEffect(() => {
+    try {
+      if (activeId) localStorage.setItem(ACTIVE_KEY, activeId)
+      else localStorage.removeItem(ACTIVE_KEY)
+    } catch { /* Storage is optional. */ }
+  }, [activeId])
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ block: 'end' })
+  }, [activeId, history, pending])
   const canAsk = !modelsLoading && !modelsError && models.some((item) => item.id === model)
 
   useEffect(() => {
@@ -144,6 +163,7 @@ export default function App() {
 
   // Reset UI to default new question UI
   function fresh() {
+    if (pending) return
     setActiveId(null)
     setQuestion('')
     setError('')
@@ -154,7 +174,10 @@ export default function App() {
   // Ask question
   async function ask(text) {
     text = text.trim()
-    if (!text || pending || !canAsk) return
+    if (!text || pending || !canAsk || turns.length >= 100) return
+    const conversationId = activeId || crypto.randomUUID()
+    setActiveId(conversationId)
+    setPendingQuestion(text)
     setPending(true)
     setError('')
     setMenu(false)
@@ -162,7 +185,9 @@ export default function App() {
       const response = await fetch(`${API_BASE}/ask`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: text, model }),
+        body: JSON.stringify({ question: text, model, history: turns.map((turn) => ({
+          question: turn.question, answer: turn.answer.slice(0, 20000),
+        })) }),
       })
       const data = await response.json()
       if (!response.ok) {
@@ -171,10 +196,9 @@ export default function App() {
       if (typeof data.answer !== 'string' || !data.answer.trim()) {
         throw new Error('The backend returned an empty answer. Please try again.')
       }
-      const entry = { id: crypto.randomUUID(), question: text, answer: data.answer,
+      const entry = { id: crypto.randomUUID(), conversationId, question: text, answer: data.answer,
         model: data.model, modelLabel: data.model_label }
-      setHistory((h) => [entry, ...h].slice(0, 100))
-      setActiveId(entry.id)
+      setHistory((h) => [entry, ...h])
       setQuestion('')
     } catch (e) {
       setError(
@@ -184,6 +208,7 @@ export default function App() {
       )
     } finally {
       setPending(false)
+      setPendingQuestion('')
     }
   }
 
@@ -212,16 +237,18 @@ export default function App() {
           <span>AskNBA</span>
         </a>
         <button className="new-chat" onClick={fresh} disabled={pending}>
-          <span className="plus">+</span> New question
+          <span className="plus">+</span> New chat
         </button>
         <div className="history-heading">
-          RECENT QUESTIONS {history.length > 0 && <span>{history.length}</span>}
+          CHATS {chats.length > 0 && <span>{chats.length}</span>}
         </div>
         <nav className="history-list" aria-label="Past questions">
           {history.length ? (
-            history.map((x) => (
+            chats.map((x) => (
               <button
                 key={x.id}
+                disabled={pending}
+                title={x.title}
                 className={
                   'history-item ' + (activeId === x.id ? 'selected' : '')
                 }
@@ -229,10 +256,11 @@ export default function App() {
                   setActiveId(x.id)
                   setMenu(false)
                   setError('')
+                  setQuestion('')
                 }}
               >
                 <SpeechBubble />
-                <span>{x.question}</span>
+                <span>{x.title}<small>{x.count} questions</small></span>
               </button>
             ))
           ) : (
@@ -300,6 +328,28 @@ export default function App() {
               </h1>
             </section>
           )}
+          {(active || pending) && (
+            <section className="conversation" aria-label="Conversation">
+              {turns.length > 0 && <details className="question-recap" open>
+                <summary>Your questions in this chat ({turns.length})</summary>
+                <ol>{turns.map((turn) => <li key={turn.id}><a href={`#turn-${turn.id}`}>{turn.question}</a></li>)}</ol>
+              </details>}
+              {turns.map((turn, index) => (
+                <div className="chat-turn" id={`turn-${turn.id}`} key={turn.id}>
+                  <div className="user-message"><span>You · {index + 1}</span><p>{turn.question}</p></div>
+                  <article className="answer">
+                    <div className="answer-heading"><Ball size={21} /><strong>AskNBA</strong>
+                      {turn.modelLabel && <span>{turn.modelLabel}</span>}
+                    </div>
+                    <div className="answer-content"><Markdown remarkPlugins={[remarkGfm]} components={markdownComponents} skipHtml>{turn.answer}</Markdown></div>
+                  </article>
+                </div>
+              ))}
+              {pending && <div className="chat-turn"><div className="user-message"><span>You</span><p>{pendingQuestion}</p></div>
+                <p role="status">AskNBA is finding your answer…</p></div>}
+              <div ref={bottom} />
+            </section>
+          )}
           <form
             className="question-form"
             onSubmit={(e) => {
@@ -317,14 +367,14 @@ export default function App() {
               onChange={(e) => setQuestion(e.target.value)}
               placeholder={
                 active
-                  ? 'Ask another question…'
+                  ? 'Ask a follow-up question…'
                   : 'What do you want to know about the NBA?'
               }
               maxLength={2000}
               disabled={pending}
               autoComplete="off"
             />
-            <button disabled={!question.trim() || pending || !canAsk}>
+            <button disabled={!question.trim() || pending || !canAsk || turns.length >= 100}>
               {pending ? 'Asking…' : 'Ask'}
               {!pending && <Arrow />}
             </button>
@@ -342,26 +392,8 @@ export default function App() {
             </p>
           )}
           <p className="input-hint" role="status">
-            {pending ? 'Finding your answer…' : ''}
+            {turns.length >= 100 ? 'This chat has reached 100 questions. Start a new chat to continue.' : active ? 'Follow-up questions use the previous messages in this chat.' : ''}
           </p>
-          {active && !pending && (
-            <section className="conversation" aria-live="polite">
-              <h1>{active.question}</h1>
-              <article className="answer">
-                <div className="answer-heading">
-                  <Ball size={21} />
-                  <strong>AskNBA</strong>
-                  {typeof active.modelLabel === 'string' && <span>{active.modelLabel}</span>}
-                  {active.sample && <span>Sample response</span>}
-                </div>
-                <div className="answer-content">
-                  <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents} skipHtml>
-                    {active.answer}
-                  </Markdown>
-                </div>
-              </article>
-            </section>
-          )}
           {!active && !pending && (
             <section className="suggestions" aria-label="Suggested questions">
               <div className="suggestions-heading">

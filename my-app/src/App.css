@@ -626,3 +626,19 @@ footer {
     padding: 14px 16px;
   }
 }
+
+/* Conversation thread and persistent composer. */
+.workspace.has-answer { padding-bottom: 24px; }
+.conversation { margin: 0 0 28px; }
+.chat-turn { margin: 24px 0 36px; scroll-margin-top: 24px; }
+.user-message { margin: 0 0 18px auto; max-width: 85%; padding: 14px 20px; border-radius: 16px 16px 3px 16px; background: #f7eade; overflow-wrap: anywhere; }
+.user-message span { font-size: 11px; color: #976a48; }
+.user-message p { margin: 6px 0 0; white-space: pre-wrap; line-height: 1.6; }
+.has-answer .question-form { position: sticky; bottom: 16px; z-index: 2; }
+.question-recap { border-bottom: 1px solid #e5e7df; padding: 0 0 16px; color: #676e60; font-size: 13px; }
+.question-recap summary { cursor: pointer; font-weight: 600; }
+.question-recap ol { max-height: 180px; overflow: auto; padding-left: 24px; }
+.question-recap li { padding: 5px 0; overflow-wrap: anywhere; }
+.question-recap a { color: inherit; text-underline-offset: 3px; }
+.history-item small { display: block; font-size: 10px; opacity: .7; }
+.history-item:disabled { opacity: .6; cursor: wait; }

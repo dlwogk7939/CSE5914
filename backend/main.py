@@ -10,7 +10,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints
 
 DB_PATH = Path(__file__).resolve().parents[1] / "nba.db"
 load_dotenv(DB_PATH.parent / ".env")
@@ -33,8 +33,14 @@ app.add_middleware(
 )
 
 
+class ConversationTurn(BaseModel):
+    question: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
+    answer: Annotated[str, StringConstraints(max_length=20000)]
+
+
 class Question(BaseModel):
     question: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
+    history: list[ConversationTurn] = Field(default_factory=list, max_length=100)
     model: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)] | None = None
 
 
@@ -80,6 +86,9 @@ def system_prompt():
     return f"""You answer NBA statistics questions using the query_sql tool and this SQLite schema:
 {schema}
 
+Use previous conversation turns to resolve follow-up questions, pronouns, players, seasons, and metrics.
+When asked what the user previously asked, list their actual questions in chronological order.
+Previous answers are conversational context, not verified database results; verify statistics with query_sql.
 Use database results for statistical claims. Never invent statistics or treat missing data as zero.
 You can make multiple queries. Correct SQL errors and retry. If results are truncated, filter,
 order, or aggregate in SQL before making claims about the complete result. Use only one statement
@@ -160,8 +169,11 @@ def ask(request: Question):
     try:
         messages = [
             {"role": "system", "content": system_prompt()},
-            {"role": "user", "content": request.question},
         ]
+        for turn in request.history:
+            messages.append({"role": "user", "content": turn.question})
+            messages.append({"role": "assistant", "content": turn.answer})
+        messages.append({"role": "user", "content": request.question})
         queries = 0
         with httpx.Client(timeout=GEMINI_TIMEOUT, trust_env=False) as client:
             for _ in range(MAX_STEPS):
