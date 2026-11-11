@@ -11,7 +11,7 @@ from typing import Annotated
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, StringConstraints
 
@@ -131,29 +131,8 @@ Use box_scores.team_id for the team a player represented in a particular game.
 box_scores.plus_minus is unavailable through season=2008; those zeroes represent missing data.
 Do not claim all-time records outside the available coverage. Resolve player names to player_id
 with a lookup query before querying their stats. Keep the final answer concise and name the season.
-
-After answering the user's question, generate 3 suggested follow-up questions.
-
-Suggestions should:
-- Be directly related to the original question and its answer.
-- Encourage further exploration of NBA statistics.
-- Be specific and answerable using the available database.
-- Avoid repeating the original question.
-- Include comparisons, player rankings, season statistics, or historical trends when relevant.
-
-Return your response in the following JSON format:
-
-{
-    "answer": "Your answer to the original question.",
-    "suggestions": [
-        "Suggested question 1?",
-        "Suggested question 2?",
-        "Suggested question 3?"
-    ]
-}
-
-Always return valid JSON. Do not include Markdown code blocks around the JSON.
 """
+
 
 def authorize(action, table, function, database, trigger):
     allowed = (
@@ -425,6 +404,68 @@ def health():
         "missing_tables": sorted(TABLES - found),
         "latest_game": last_date,
     }
+
+
+RECENT_GAMES_SQL = """
+WITH recent AS (
+    SELECT game_id, date, season, home_team_id, away_team_id
+    FROM games
+    WHERE game_id IN (SELECT game_id FROM box_scores)
+    ORDER BY date DESC, game_id DESC
+    LIMIT ?
+),
+scores AS (
+    -- games has no score columns, so each team's score is the sum of its players' points
+    SELECT b.game_id, b.team_id, sum(b.points) AS points
+    FROM box_scores b JOIN recent r ON r.game_id = b.game_id
+    GROUP BY b.game_id, b.team_id
+),
+leaders AS (
+    SELECT b.game_id, p.full_name, t.abbreviation AS team, b.points, b.rebounds, b.assists,
+           row_number() OVER (PARTITION BY b.game_id
+                              ORDER BY b.points DESC, b.rebounds + b.assists DESC) AS rank
+    FROM box_scores b
+    JOIN recent r ON r.game_id = b.game_id
+    JOIN players p ON p.player_id = b.player_id
+    LEFT JOIN teams t ON t.team_id = b.team_id
+)
+SELECT r.game_id, r.date, r.season,
+       ht.name, ht.abbreviation, hs.points,
+       at.name, at.abbreviation, aws.points,
+       l.full_name, l.team, l.points, l.rebounds, l.assists
+FROM recent r
+LEFT JOIN teams ht ON ht.team_id = r.home_team_id
+LEFT JOIN teams at ON at.team_id = r.away_team_id
+LEFT JOIN scores hs ON hs.game_id = r.game_id AND hs.team_id = r.home_team_id
+LEFT JOIN scores aws ON aws.game_id = r.game_id AND aws.team_id = r.away_team_id
+LEFT JOIN leaders l ON l.game_id = r.game_id AND l.rank = 1
+ORDER BY r.date DESC, r.game_id DESC
+"""
+
+
+@app.get("/recent-games")
+def recent_games(limit: int = Query(8, ge=1, le=30)):
+    """Most recent games in nba.db with final scores and each game's top scorer, for the homepage."""
+    try:
+        with closing(connect()) as db:
+            rows = db.execute(RECENT_GAMES_SQL, (limit,)).fetchall()
+    except sqlite3.Error as error:
+        raise HTTPException(503, f"Cannot read nba.db: {error}") from error
+    games = []
+    for (game_id, game_date, season, home_name, home_abbr, home_pts, away_name, away_abbr, away_pts,
+         leader_name, leader_team, leader_pts, leader_reb, leader_ast) in rows:
+        games.append({
+            "game_id": game_id,
+            "date": game_date,
+            "season": season,
+            "home": {"name": home_name, "abbreviation": home_abbr, "score": home_pts},
+            "away": {"name": away_name, "abbreviation": away_abbr, "score": away_pts},
+            "top_performer": leader_name and {
+                "name": leader_name, "team": leader_team,
+                "points": leader_pts, "rebounds": leader_reb, "assists": leader_ast,
+            },
+        })
+    return {"games": games}
 
 
 @app.get("/update/status")

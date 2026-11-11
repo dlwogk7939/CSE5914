@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import './App.css'
+import RecentGames from './RecentGames'
 
 const KEY = 'historykey'
 const ACTIVE_KEY = 'asknba-active-chat'
@@ -414,6 +415,9 @@ export default function App() {
                 ))}
               </div>
             </section>
+          )}
+          {!active && !pending && (
+            <RecentGames apiBase={API_BASE} onAsk={ask} disabled={pending || !canAsk} />
           )}
         </div>
       </main>

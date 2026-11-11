@@ -1,0 +1,122 @@
+/* Recent games on the homepage. Colors come from the surrounding text color so it
+   matches the existing theme (light or dark) without needing App.css variables. */
+
+.recent-games {
+  width: 100%;
+  margin-top: 2rem;
+}
+
+.recent-games-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.9rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  opacity: 0.65;
+}
+
+.recent-games-heading span {
+  flex: 1;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.35;
+}
+
+.recent-games-note {
+  margin: 0;
+  text-align: center;
+  font-size: 0.9rem;
+  opacity: 0.75;
+}
+
+.recent-games-note button {
+  font: inherit;
+  color: inherit;
+  text-decoration: underline;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+.game-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.game-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  width: 100%;
+  height: 100%;
+  padding: 0.85rem 0.95rem;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.game-card:hover:not(:disabled),
+.game-card:focus-visible {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  border-color: color-mix(in srgb, currentColor 35%, transparent);
+}
+
+.game-card:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.game-date {
+  font-size: 0.75rem;
+  opacity: 0.6;
+}
+
+.game-team {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.98rem;
+  opacity: 0.7;
+}
+
+.game-team.won {
+  font-weight: 700;
+  opacity: 1;
+}
+
+.game-team-name small {
+  font-size: 0.68rem;
+  font-weight: 400;
+  opacity: 0.6;
+}
+
+.game-score {
+  font-variant-numeric: tabular-nums;
+}
+
+.game-leader {
+  margin-top: 0.3rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  font-size: 0.75rem;
+  line-height: 1.35;
+  opacity: 0.8;
+}
+
+.game-leader strong {
+  font-weight: 600;
+}
