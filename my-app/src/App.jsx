@@ -172,6 +172,12 @@ export default function App() {
     input.current?.focus()
   }
 
+  function deleteChat(id) {
+    if (pending) return
+    setHistory((h) => h.filter((turn) => turn.conversationId !== id))
+    if (activeId === id) fresh()
+  }
+
   // Ask question
   async function ask(text) {
     text = text.trim()
@@ -246,8 +252,8 @@ export default function App() {
         <nav className="history-list" aria-label="Past questions">
           {history.length ? (
             chats.map((x) => (
+              <div className="history-row" key={x.id}>
               <button
-                key={x.id}
                 disabled={pending}
                 title={x.title}
                 className={
@@ -263,6 +269,18 @@ export default function App() {
                 <SpeechBubble />
                 <span>{x.title}<small>{x.count} questions</small></span>
               </button>
+              <button
+                className="delete-chat"
+                disabled={pending}
+                aria-label={`Delete chat: ${x.title}`}
+                title="Delete chat"
+                onClick={() => deleteChat(x.id)}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+                  <path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7" />
+                </svg>
+              </button>
+              </div>
             ))
           ) : (
             <div className="history-empty">

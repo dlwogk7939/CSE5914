@@ -78,6 +78,35 @@
   font-size: 12px;
   line-height: 1.6;
 }
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.history-row .history-item {
+  flex: 1;
+  min-width: 0;
+}
+.delete-chat {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 36px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #858b80;
+  cursor: pointer;
+}
+.delete-chat:hover {
+  background: #f7eade;
+  color: #a3451c;
+}
+.delete-chat:disabled {
+  opacity: .6;
+  cursor: wait;
+}
 .history-item {
   display: flex;
   gap: 10px;
