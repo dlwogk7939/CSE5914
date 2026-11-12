@@ -1,6 +1,7 @@
 *
 !backend/
 !backend/main.py
+!backend/espn.py
 !backend/requirements.txt
 !nba.db
 !my-app/

@@ -3,9 +3,9 @@ import os
 import sqlite3
 import threading
 import time
-from collections import defaultdict
 from contextlib import asynccontextmanager, closing
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
+from html import unescape
 from pathlib import Path
 from typing import Annotated
 
@@ -15,6 +15,8 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, StringConstraints
 
+from backend import espn
+
 DB_PATH = Path(__file__).resolve().parents[1] / "nba.db"
 load_dotenv(DB_PATH.parent / ".env")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
@@ -23,13 +25,12 @@ GEMINI_MODELS = {
     "gemini-3.5-flash-lite": "Gemini 3.5 Flash-Lite",
     "gemini-3.1-flash-lite": "Gemini 3.1 Flash-Lite"
 }
-MAX_STEPS, MAX_QUERIES, MAX_ROWS = 8, 8, 100
+MAX_STEPS, MAX_QUERIES, MAX_ROWS = 20, 20, 100
 QUERY_TIMEOUT, GEMINI_TIMEOUT = 5, 120
-TABLES = {"teams", "players", "games", "box_scores", "season_totals"}
+LEGACY_TABLES = {"teams", "players", "games", "box_scores", "season_totals"}
+TABLES = LEGACY_TABLES | espn.DATA_TABLES
 
 # ESPN updater settings
-ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
-REGULAR_SEASON = 2  # ESPN season type: 1 preseason, 2 regular season, 3 playoffs, 5 play-in
 UPDATE_INTERVAL_HOURS = float(os.environ.get("UPDATE_INTERVAL_HOURS", "6"))
 AUTO_UPDATE = os.environ.get("AUTO_UPDATE", "1") != "0"
 
@@ -63,10 +64,17 @@ class Question(BaseModel):
     question: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
     history: list[ConversationTurn] = Field(default_factory=list, max_length=100)
     model: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)] | None = None
+    league: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)] | None = None
+
+
+class GeneratedAnswer(BaseModel):
+    answer: str
+    suggestions: list[str] = Field(min_length=3, max_length=3)
 
 
 class Answer(BaseModel):
     answer: str
+    suggestions: list[str] = Field(default_factory=list)
     model: str
     model_label: str
 
@@ -103,34 +111,93 @@ def season_label(season):
     return f"{season - 1}-{str(season)[2:]}"
 
 
-def system_prompt():
+def loaded_league(league, datasets):
+    item = next((item for item in datasets if item["league_id"] == league), None)
+    if not item or not (item["complete_games"] or item["legacy_games"]):
+        raise HTTPException(422, "Choose a league with loaded data.")
+    return item
+
+
+def system_prompt(league=None):
     with closing(connect()) as db:
-        schema = "\n".join(row[0] for row in db.execute(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' ORDER BY name"
-        ))
-        last_season, last_date = db.execute("SELECT max(season), max(date) FROM games").fetchone()
-    return f"""You answer NBA statistics questions using the query_sql tool and this SQLite schema:
+        schema = "\n".join(row[1] for row in db.execute(
+            "SELECT name,sql FROM sqlite_master WHERE type IN ('table','view') ORDER BY name"
+        ) if row[0] in TABLES and row[1])
+        datasets = espn.coverage(db)
+        first_season, last_season, last_date = db.execute("SELECT min(season),max(season),max(date) FROM games").fetchone()
+    selection = loaded_league(league, datasets) if league else None
+    context = (f"Selected league: {selection['name']} (league_id={league}). Use this league for questions "
+               "and follow-ups. If a question conflicts with this selection, ask the user to clarify."
+               if selection else "No league is selected; use the league named in the question or conversation.")
+    response_shape = json.dumps({"answer": "A concise answer in Markdown, naming the league and season.",
+                                 "suggestions": ["Related question 1?", "Related question 2?", "Related question 3?"]})
+    return f"""You answer sports statistics questions using query_sql and this SQLite schema:
 {schema}
 
-Use previous conversation turns to resolve follow-up questions, pronouns, players, seasons, and metrics.
-When asked what the user previously asked, list their actual questions in chronological order.
-Previous answers are conversational context, not verified database results; verify statistics with query_sql.
-Use database results for statistical claims. Never invent statistics or treat missing data as zero.
-You can make multiple queries. Correct SQL errors and retry. If results are truncated, filter,
-order, or aggregate in SQL before making claims about the complete result. Use only one statement
-per tool call. Ask the user to clarify an ambiguous player, season, or metric.
+{context}
 
-Data covers NBA regular seasons 1993-94 through {season_label(last_season)}, with games through
-{last_date[:10]} (UTC dates). It does not include playoffs or games still in progress.
-season is the END year: 2026 means 2025-26. season_totals also has an incomplete 1992-93 subset
-(season=1993); do not use that subset for league rankings or complete-season coverage claims.
-Use season_totals for season stats and games played. Its rows combine teams when a player was traded.
-Some box score rows were skipped during ingestion; game-level aggregates may be incomplete.
-players.team_id is the team from the last processed game, not a reliable current-team field.
-Use box_scores.team_id for the team a player represented in a particular game.
-box_scores.plus_minus is unavailable through season=2008; those zeroes represent missing data.
-Do not claim all-time records outside the available coverage. Resolve player names to player_id
-with a lookup query before querying their stats. Keep the final answer concise and name the season.
+Loaded league summary (partial imports are possible):
+{json.dumps(datasets)}
+Legacy NBA data covers seasons {first_season} through {last_season}, with games through {last_date}.
+
+Use previous turns for follow-up context; verify statistics with query_sql. When asked about
+previous questions, list the actual questions chronologically. Clarify ambiguous players,
+leagues, seasons, or metrics. Never invent statistics or treat NULL/missing data as zero.
+Filter by league_id and join on BOTH league_id and the entity/game id. ESPN ids are scoped by league.
+College coverage uses Division I scoreboards; football includes FBS and FCS. Opponent records
+can include other divisions, so do not assume an athlete's division without supporting data.
+The original teams/players/games/box_scores/season_totals tables are NBA-only historical data.
+Legacy NBA season totals are available independently of the new import checkpoints.
+Prefer the sport-specific tables for newly imported data; use legacy NBA tables when needed
+for older coverage. Do not combine overlapping legacy and new rows as separate games.
+
+Before league-wide rankings or historical records, query data_coverage and import_progress.
+Only claim the coverage actually loaded. A schedule_status of complete means the selected
+season dates were scanned through the import timestamp; missing_games still indicates gaps.
+Current seasons remain partial. Never describe coverage as all-time without checking its extent.
+Use league_games.season_label and phase_name to interpret seasons. NBA/college basketball/NHL
+use the season END year; NFL/WNBA/MLB/MLS use calendar years; European soccer uses the START year.
+Always distinguish regular seasons, playoffs/play-in, and tournaments. Default to regular-season
+stats unless the question requests otherwise. Use season_type and phase_name to filter phases.
+Regular-season type is 1 for soccer and 2 for the other configured sports; postseason phases are separate.
+Game timestamps are UTC; label or convert dates explicitly rather than implying a local date.
+
+Each sport has player/team box-score and season-total tables. Player box scores may have
+multiple category rows per game (e.g. football passing/rushing or baseball batting/pitching).
+Filter category when needed; count DISTINCT game_id/player_id rather than counting category rows.
+Season-total columns include their source category prefix to prevent collisions. Query
+stat_columns for column definitions. Use ESPN season totals for season statistics and rates.
+Do not sum percentages, averages, year-to-date fields, or season-to-date values embedded in game
+box scores. MLB outs_recorded is an integer count of outs, not decimal innings. Duration columns
+ending _seconds are seconds. Other duration fields may be M:SS strings. Check units before converting.
+
+Individual-sport games are matches, fights, tournaments, or race sessions. Use event_name,
+competition_type, round_name, and the sport's box scores. Racing total_time_ms is milliseconds;
+filter race sessions separately from practice/qualifying. Golf display_order is source display
+order, not an authoritative tied finishing position. Golf round_N_strokes are scorecard strokes.
+Cuts/withdrawals can have fewer golf rounds; do not rank partial stroke totals as full tournaments.
+Tennis atp includes men's and mixed-doubles match cards; wta includes women's matches.
+Filter category for singles/doubles/mixed/qualifying. Doubles player rows share the match result
+and set scores; pair-level detailed stats belong in team_box_scores. Do not attribute pair aces
+to each individual. detailed_stats_available=0 means ESPN supplied scorecards without detailed
+match stats. Unavailable golf breakdowns are NULL, not zero. F1 season totals come from ESPN
+driver/constructor standings. UFC derived_* season columns aggregate only loaded fights;
+check coverage and unresolved results, and describe them as derived rather than official totals.
+Current-season source totals may lag recent game results; disclose such a discrepancy.
+
+Legacy NBA caveats: season_totals has an incomplete 1992-93 subset (season=1993), unsuitable
+for full-league comparisons. Some box scores were skipped. players.team_id is a last-processed
+team, not a current-team field; use box_scores.team_id for historical membership. Legacy NBA
+plus_minus is missing through season=2008; those zeroes do not establish actual plus/minus.
+
+Use only one read-only statement per tool call. Correct SQL errors and retry. If a result is
+truncated, filter/order/aggregate in SQL before making claims about the whole result.
+After answering, suggest three concise follow-up questions related to the answer and selected league.
+Use loaded data and coverage to suggest answerable questions. Include player/team names and seasons
+where needed, and avoid repeating questions already asked. Do not answer the follow-ups yet.
+When coverage is partial, focus on loaded games/events instead of season-wide or all-time rankings.
+Return JSON in this format: {response_shape}
+The answer string can contain Markdown tables or lists. Do not wrap the JSON in a code block.
 """
 
 
@@ -148,8 +215,9 @@ def query_sql(sql):
     try:
         if not isinstance(sql, str) or not sql.strip():
             raise ValueError("sql must be a nonempty string.")
+        if len(sql.encode("utf-8")) > 10000:
+            raise ValueError("SQL must not exceed 10,000 bytes.")
         with closing(connect()) as db:
-            db.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 10000)
             db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 100000)
             db.set_authorizer(authorize)
             deadline = time.monotonic() + QUERY_TIMEOUT
@@ -178,208 +246,36 @@ def tool_result(call):
         return json.dumps({"error": f"Invalid tool call: {error}"})
 
 
-# ---------------------------------------------------------------------------
-# ESPN updater
-#
-# nba.db was built from ESPN data (game_id, player_id and team_id are ESPN IDs),
-# so new ESPN games line up with the existing rows. Each run only:
-#   1. Asks ESPN's scoreboard, one game day at a time, for completed regular-season
-#      games from 2 days before the newest game in nba.db up to today (a few requests).
-#   2. Downloads box scores only for games that are not in nba.db yet.
-#   3. Recalculates season_totals only for players who appeared in those games.
-# Runs automatically every UPDATE_INTERVAL_HOURS, or on demand with POST /update.
-# ---------------------------------------------------------------------------
-
 update_lock = threading.Lock()
 update_status = {"running": False, "last_run": None, "last_result": None}
 
-TOTAL_COLUMNS = ["points", "rebounds", "assists", "steals", "blocks", "turnovers", "fouls",
-                 "fgm", "fga", "fg3m", "fg3a", "ftm", "fta"]
-AVERAGE_COLUMNS = {"ppg": "points", "rpg": "rebounds", "apg": "assists", "spg": "steals",
-                   "bpg": "blocks", "tpg": "turnovers", "mpg": "minutes"}
-
-
-def parse_int(value):
-    try:
-        return int(str(value).replace("+", ""))
-    except (TypeError, ValueError):
-        return None  # ESPN uses "--" for missing values
-
-
-def parse_made_attempted(value):
-    made, _, attempted = str(value).partition("-")
-    return parse_int(made), parse_int(attempted)
-
-
-def espn_get(client, path, params):
-    response = client.get(f"{ESPN_BASE}/{path}", params=params)
-    response.raise_for_status()
-    return response.json()
-
-
-def scoreboard(client, day):
-    return espn_get(client, "scoreboard", {"dates": f"{day:%Y%m%d}"})
-
-
-def find_new_games(client, db):
-    """Completed regular-season ESPN games that nba.db does not have yet, oldest first."""
-    latest = db.execute("SELECT max(date) FROM games").fetchone()[0]
-    if latest:
-        start = (datetime.fromisoformat(latest.replace("Z", "+00:00")) - timedelta(days=2)).date()
-    else:
-        start = date(1993, 11, 1)
-    end = datetime.now(timezone.utc).date()
-    known = {row[0] for row in db.execute("SELECT game_id FROM games")}
-
-    # Each scoreboard response lists every day with games in that season ("calendar"), so we
-    # only request days that actually had games instead of every date (skips the offseason).
-    boards = {day: scoreboard(client, day) for day in {start, end}}
-    game_days = set()
-    for board in boards.values():
-        for league in board.get("leagues", []):
-            for entry in league.get("calendar", []):
-                if isinstance(entry, str):
-                    game_days.add(entry[:10])
-    days = [start + timedelta(days=n) for n in range((end - start).days + 1)]
-    if game_days:  # if ESPN ever drops the calendar, fall back to checking every day
-        days = [day for day in days if day.isoformat() in game_days or day in boards]
-
-    new_games = {}
-    for day in days:
-        board = boards.get(day) or scoreboard(client, day)
-        for event in board.get("events", []):
-            if (event.get("season", {}).get("type") == REGULAR_SEASON
-                    and event.get("status", {}).get("type", {}).get("completed")
-                    and int(event["id"]) not in known):
-                new_games[event["id"]] = event
-    return sorted(new_games.values(), key=lambda event: event["date"])
-
-
-def box_score_rows(summary):
-    """Turn an ESPN game summary into (player, box score) rows. Skips players who did not play."""
-    rows = []
-    for team_block in summary.get("boxscore", {}).get("players", []):
-        team_id = int(team_block["team"]["id"])
-        for group in team_block.get("statistics", [])[:1]:
-            keys = group.get("keys") or []
-            for entry in group.get("athletes", []):
-                if entry.get("didNotPlay") or not entry.get("stats"):
-                    continue
-                stats = dict(zip(keys, entry["stats"]))
-                athlete = entry["athlete"]
-                fgm, fga = parse_made_attempted(stats.get("fieldGoalsMade-fieldGoalsAttempted"))
-                fg3m, fg3a = parse_made_attempted(stats.get("threePointFieldGoalsMade-threePointFieldGoalsAttempted"))
-                ftm, fta = parse_made_attempted(stats.get("freeThrowsMade-freeThrowsAttempted"))
-                rows.append({
-                    "player_id": int(athlete["id"]),
-                    "full_name": athlete.get("displayName"),
-                    "position": (athlete.get("position") or {}).get("abbreviation"),
-                    "team_id": team_id,
-                    "minutes": parse_int(stats.get("minutes")),
-                    "points": parse_int(stats.get("points")),
-                    "rebounds": parse_int(stats.get("rebounds")),
-                    "assists": parse_int(stats.get("assists")),
-                    "steals": parse_int(stats.get("steals")),
-                    "blocks": parse_int(stats.get("blocks")),
-                    "turnovers": parse_int(stats.get("turnovers")),
-                    "fouls": parse_int(stats.get("fouls")),
-                    "plus_minus": parse_int(stats.get("plusMinus")),
-                    "fgm": fgm, "fga": fga, "fg3m": fg3m, "fg3a": fg3a, "ftm": ftm, "fta": fta,
-                })
-    return rows
-
-
-def add_game(db, client, event):
-    """Insert one new game with its box score. Returns the player IDs that appeared, or an
-    empty set if ESPN has no box score yet (the game is then retried on the next run)."""
-    rows = box_score_rows(espn_get(client, "summary", {"event": event["id"]}))
-    if not rows:
-        return set()
-    teams = {c["homeAway"]: c["team"] for c in event["competitions"][0]["competitors"]}
-    with db:  # one transaction per game: either all of it is saved or none of it
-        for team in teams.values():
-            db.execute("INSERT OR IGNORE INTO teams (team_id, name, abbreviation) VALUES (?, ?, ?)",
-                       (int(team["id"]), team.get("displayName"), team.get("abbreviation")))
-        db.execute("INSERT INTO games (game_id, date, season, home_team_id, away_team_id) VALUES (?, ?, ?, ?, ?)",
-                   (int(event["id"]), event["date"], int(event["season"]["year"]),
-                    int(teams["home"]["id"]), int(teams["away"]["id"])))
-        for row in rows:
-            db.execute(
-                """INSERT INTO players (player_id, full_name, position, team_id) VALUES (?, ?, ?, ?)
-                   ON CONFLICT(player_id) DO UPDATE SET
-                     full_name = coalesce(excluded.full_name, full_name),
-                     position = coalesce(excluded.position, position),
-                     team_id = excluded.team_id""",
-                (row["player_id"], row["full_name"], row["position"], row["team_id"]))
-            db.execute(
-                """INSERT OR IGNORE INTO box_scores (game_id, player_id, team_id, minutes, points, rebounds,
-                     assists, steals, blocks, turnovers, fouls, plus_minus, fgm, fga, fg3m, fg3a, ftm, fta)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (int(event["id"]), row["player_id"], row["team_id"], row["minutes"], row["points"],
-                 row["rebounds"], row["assists"], row["steals"], row["blocks"], row["turnovers"],
-                 row["fouls"], row["plus_minus"], row["fgm"], row["fga"], row["fg3m"], row["fg3a"],
-                 row["ftm"], row["fta"]))
-    return {row["player_id"] for row in rows}
-
-
-def update_season_totals(db, season, player_ids):
-    """Recalculate season_totals from box_scores, only for the given players in one season."""
-    ids = sorted(player_ids)
-    sums = ", ".join(f"sum(b.{c})" for c in TOTAL_COLUMNS)
-    averages = ", ".join(f"1.0 * sum(b.{c}) / count(*)" for c in AVERAGE_COLUMNS.values())
-    columns = TOTAL_COLUMNS + list(AVERAGE_COLUMNS)
-    updates = ", ".join(f"{c} = excluded.{c}" for c in ["games_played"] + columns)
-    with db:
-        for i in range(0, len(ids), 500):
-            chunk = ids[i:i + 500]
-            db.execute(
-                f"""INSERT INTO season_totals (player_id, season, games_played, {", ".join(columns)})
-                    SELECT b.player_id, g.season, count(*), {sums}, {averages}
-                    FROM box_scores b JOIN games g ON g.game_id = b.game_id
-                    WHERE g.season = ? AND b.player_id IN ({", ".join("?" * len(chunk))})
-                    GROUP BY b.player_id
-                    ON CONFLICT(player_id, season) DO UPDATE SET {updates}""",
-                [season, *chunk])
-
 
 def run_update():
-    """Add any new games from ESPN. Safe to call repeatedly: it skips games already saved."""
     if not update_lock.acquire(blocking=False):
         return {"status": "already running"}
     update_status["running"] = True
-    started = time.monotonic()
-    result = {"status": "ok", "games_added": 0, "players_updated": 0, "errors": []}
     try:
-        touched = defaultdict(set)
-        with closing(sqlite3.connect(DB_PATH, timeout=30)) as db, httpx.Client(timeout=30) as client:
-            for event in find_new_games(client, db):
-                try:
-                    players = add_game(db, client, event)
-                except (httpx.HTTPError, sqlite3.Error, KeyError, TypeError, ValueError) as error:
-                    result["errors"].append(f"game {event.get('id')}: {error}")
-                    continue
-                if players:
-                    result["games_added"] += 1
-                    touched[int(event["season"]["year"])].update(players)
-                time.sleep(0.25)  # be polite to ESPN
-            for season, players in touched.items():
-                update_season_totals(db, season, players)
-                result["players_updated"] += len(players)
-    except (httpx.HTTPError, sqlite3.Error, KeyError, TypeError, ValueError) as error:
-        result.update(status="error", error=str(error))
+        result = espn.run_import(DB_PATH, days=3)
+        update_status["last_result"] = result
+        return result
     finally:
-        result["seconds"] = round(time.monotonic() - started, 1)
-        update_status.update(running=False, last_run=datetime.now(timezone.utc).isoformat(), last_result=result)
+        update_status.update(running=False, last_run=datetime.now(timezone.utc).isoformat())
         update_lock.release()
-    print(f"ESPN update: {result}")
-    return result
 
 
 def update_loop(stop):
-    """The 6-hour schedule: update now, wait UPDATE_INTERVAL_HOURS, repeat until shutdown."""
     while not stop.is_set():
         run_update()
         stop.wait(UPDATE_INTERVAL_HOURS * 3600)
+
+
+@app.get("/coverage")
+def data_coverage():
+    try:
+        with closing(connect()) as db:
+            return {"leagues": espn.coverage(db)}
+    except sqlite3.Error as error:
+        raise HTTPException(503, f"Cannot read database: {error}") from error
 
 
 @app.get("/")
@@ -395,13 +291,15 @@ def health():
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )}
             last_date = db.execute("SELECT max(date) FROM games").fetchone()[0]
+            if "league_games" in found:
+                last_date = db.execute("SELECT max(date) FROM league_games").fetchone()[0] or last_date
     except sqlite3.Error as error:
         raise HTTPException(503, f"Cannot read nba.db at {DB_PATH}: {error}") from error
     return {
         "status": "ok",
         "database": str(DB_PATH),
         "tables": sorted(found & TABLES),
-        "missing_tables": sorted(TABLES - found),
+        "missing_tables": sorted(LEGACY_TABLES - found),
         "latest_game": last_date,
     }
 
@@ -443,18 +341,76 @@ ORDER BY r.date DESC, r.game_id DESC
 """
 
 
+NBA_RECENT_GAMES_SQL = """
+WITH recent AS (
+    SELECT * FROM league_games
+    WHERE league_id='nba' AND stats_status='complete'
+    ORDER BY date DESC, game_id DESC LIMIT ?
+),
+leaders AS (
+    SELECT b.game_id, p.full_name, t.abbreviation AS team, b.points, b.rebounds, b.assists,
+           row_number() OVER (PARTITION BY b.game_id
+                              ORDER BY b.points DESC, b.rebounds + b.assists DESC) AS rank
+    FROM basketball_box_scores b
+    JOIN recent r ON r.game_id=b.game_id AND r.league_id=b.league_id
+    LEFT JOIN league_players p ON p.league_id=b.league_id AND p.player_id=b.player_id
+    LEFT JOIN league_teams t ON t.league_id=b.league_id AND t.team_id=b.team_id
+    WHERE b.league_id='nba' AND b.category='total'
+)
+SELECT CAST(r.game_id AS INTEGER), r.date, r.season,
+       ht.name, ht.abbreviation, r.home_score,
+       at.name, at.abbreviation, r.away_score,
+       l.full_name, l.team, l.points, l.rebounds, l.assists
+FROM recent r
+LEFT JOIN league_teams ht ON ht.league_id=r.league_id AND ht.team_id=r.home_team_id
+LEFT JOIN league_teams at ON at.league_id=r.league_id AND at.team_id=r.away_team_id
+LEFT JOIN leaders l ON l.game_id=r.game_id AND l.rank=1
+ORDER BY r.date DESC, r.game_id DESC
+"""
+
+
 @app.get("/recent-games")
-def recent_games(limit: int = Query(8, ge=1, le=30)):
-    """Most recent games in nba.db with final scores and each game's top scorer, for the homepage."""
+def recent_games(limit: int = Query(8, ge=1, le=30), league: str | None = None):
+    """Loaded results for a league; NBA merges new imports with its historical cards."""
     try:
         with closing(connect()) as db:
+            if league and league != "nba":
+                info = loaded_league(league, espn.coverage(db))
+                sport = info["sport"]
+                if sport not in espn.SPORTS:
+                    raise HTTPException(422, "Unsupported sport.")
+                db.row_factory = sqlite3.Row
+                games = [dict(row) for row in db.execute("""SELECT * FROM league_games
+                    WHERE league_id=? AND stats_status='complete' ORDER BY date DESC,game_id DESC LIMIT ?""", (league, limit))]
+                if sport in espn.TEAM_SPORTS:
+                    teams = {row["team_id"]: dict(row) for row in db.execute(
+                        "SELECT team_id,name,abbreviation FROM league_teams WHERE league_id=?", (league,))}
+                    for game in games:
+                        game["kind"] = "team"
+                        for side in ("home", "away"):
+                            game[side] = {**teams.get(game[side + "_team_id"], {}), "score": game[side + "_score"]}
+                else:
+                    identity = "coalesce(nullif(b.team_id,''),b.player_id)" if sport == "tennis" else "b.player_id"
+                    for game in games:
+                        game["kind"] = "match" if sport in ("tennis", "mma") else "event"
+                        game["participants"] = [dict(row) for row in db.execute(f"""SELECT {identity} AS id,
+                            coalesce(max(t.name),group_concat(DISTINCT p.full_name)) AS name,max(b.winner) AS winner
+                            FROM {sport}_box_scores b
+                            LEFT JOIN league_players p ON p.league_id=b.league_id AND p.player_id=b.player_id
+                            LEFT JOIN league_teams t ON t.league_id=b.league_id AND t.team_id=b.team_id
+                            WHERE b.league_id=? AND b.game_id=? AND (?='match' OR b.winner=1) GROUP BY {identity}
+                            ORDER BY max(b.winner) DESC,min(b.display_order),id""", (league, game["game_id"], game["kind"]))]
+                return {"games": games}
             rows = db.execute(RECENT_GAMES_SQL, (limit,)).fetchall()
+            columns = {row[1] for row in db.execute("PRAGMA table_info(basketball_box_scores)")}
+            if {"points", "rebounds", "assists"} <= columns:
+                rows += db.execute(NBA_RECENT_GAMES_SQL, (limit,)).fetchall()
     except sqlite3.Error as error:
         raise HTTPException(503, f"Cannot read nba.db: {error}") from error
-    games = []
+    games = {}
     for (game_id, game_date, season, home_name, home_abbr, home_pts, away_name, away_abbr, away_pts,
          leader_name, leader_team, leader_pts, leader_reb, leader_ast) in rows:
-        games.append({
+        games[game_id] = {
             "game_id": game_id,
             "date": game_date,
             "season": season,
@@ -464,13 +420,13 @@ def recent_games(limit: int = Query(8, ge=1, le=30)):
                 "name": leader_name, "team": leader_team,
                 "points": leader_pts, "rebounds": leader_reb, "assists": leader_ast,
             },
-        })
-    return {"games": games}
+        }
+    return {"games": sorted(games.values(), key=lambda game: (game["date"], game["game_id"]), reverse=True)[:limit]}
 
 
 @app.get("/update/status")
 def get_update_status():
-    return update_status
+    return {**update_status, "running": update_status["running"] or espn.import_running(DB_PATH)}
 
 
 @app.post("/update")
@@ -490,7 +446,7 @@ def ask(request: Question):
         raise HTTPException(503, "Set API_KEY in the repository's .env file to your Gemini API key.")
     try:
         messages = [
-            {"role": "system", "content": system_prompt()},
+            {"role": "system", "content": system_prompt(request.league)},
         ]
         for turn in request.history:
             messages.append({"role": "user", "content": turn.question})
@@ -501,6 +457,9 @@ def ask(request: Question):
             for _ in range(MAX_STEPS):
                 response = client.post(GEMINI_URL, headers={"Authorization": f"Bearer {api_key}"}, json={
                     "model": model, "messages": messages, "tools": TOOLS, "stream": False,
+                    "response_format": {"type": "json_schema", "json_schema": {
+                        "name": "sports_answer", "schema": GeneratedAnswer.model_json_schema(),
+                    }},
                 })
                 response.raise_for_status()
                 message = response.json()["choices"][0]["message"]
@@ -512,9 +471,26 @@ def ask(request: Question):
                     raise ValueError("Expected a list of tool calls.")
                 if not calls:
                     answer = message.get("content", "").strip()
+                    suggestions = []
                     if not answer:
                         raise ValueError("The model returned an empty answer.")
-                    return {"answer": answer, "model": model, "model_label": selected["label"]}
+                    structured_text = answer.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+                    if structured_text.startswith("{"):
+                        try:
+                            structured = json.loads(structured_text)
+                            if not isinstance(structured, dict) or not isinstance(structured.get("answer"), str):
+                                raise ValueError("The model returned an invalid answer. Please try again.")
+                            answer = structured["answer"].strip()
+                            raw = structured.get("suggestions", [])
+                            if isinstance(raw, list):
+                                raw = [unescape(q).strip() for q in raw if isinstance(q, str)]
+                                suggestions = list(dict.fromkeys(q for q in raw if 0 < len(q) <= 4000))[:3]
+                        except json.JSONDecodeError:
+                            raise ValueError("The model returned an invalid answer. Please try again.") from None
+                    answer = unescape(answer).strip()
+                    if not answer:
+                        raise ValueError("The model returned an empty answer.")
+                    return {"answer": answer, "suggestions": suggestions, "model": model, "model_label": selected["label"]}
                 for call in calls:
                     queries += 1
                     if queries > MAX_QUERIES:

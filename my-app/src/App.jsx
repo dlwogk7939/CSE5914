@@ -7,6 +7,7 @@ import RecentGames from './RecentGames'
 const KEY = 'historykey'
 const ACTIVE_KEY = 'asknba-active-chat'
 const MODEL_KEY = 'asknba-gemini-model'
+const LEAGUE_KEY = 'asknba-league'
 const API_BASE = `${import.meta.env.BASE_URL}api`
 const markdownComponents = {
   table: ({ children }) => (
@@ -18,9 +19,9 @@ const markdownComponents = {
   img: () => null,
 }
 const prompts = [
-  ['LEAGUE LEADERS', 'Who led the NBA in assists in 2025?'],
-  ['PLAYER COMPARISONS', 'Compare LeBron and Curry since 2015'],
-  ['SHOOTING STATS', 'Who are the best 3-point shooters?'],
+  ['BASKETBALL', 'Who led the NBA in assists in 2025?'],
+  ['FOOTBALL', 'Who led the NFL in passing yards in 2025?'],
+  ['SOCCER', 'Who led the Premier League in goals in 2025–26?'],
 ]
 
 // Basketball graphic used as logo
@@ -98,6 +99,12 @@ export default function App() {
   const [activeId, setActiveId] = useState(() => {
     try { return localStorage.getItem(ACTIVE_KEY) } catch { return null }
   })
+  const [league, setLeague] = useState(() => {
+    const chat = history.find((turn) => turn.conversationId === activeId)
+    if (chat) return chat.league || ''
+    try { return localStorage.getItem(LEAGUE_KEY) ?? 'nba' } catch { return 'nba' }
+  })
+  const [leagues, setLeagues] = useState([])
   const [question, setQuestion] = useState('')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
@@ -114,8 +121,14 @@ export default function App() {
   const active = turns.at(-1)
   const chats = [...new Set(history.map((x) => x.conversationId))].map((id) => {
     const entries = history.filter((x) => x.conversationId === id)
-    return { id, title: entries.at(-1).question, count: entries.length }
+    return { id, title: entries.at(-1).question, count: entries.length, league: entries.at(-1).league }
   })
+  const selectedLeague = leagues.find((item) => item.league_id === league)
+  const suggestions = selectedLeague ? [
+    `Show the latest ${selectedLeague.name} results.`,
+    `What seasons are available for ${selectedLeague.name}?`,
+    `Which statistics are available for ${selectedLeague.name}?`,
+  ] : prompts.map(([, text]) => text)
   const bottom = useRef(null)
   const [pendingQuestion, setPendingQuestion] = useState('')
   useEffect(() => {
@@ -127,24 +140,27 @@ export default function App() {
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: 'end' })
   }, [activeId, history, pending])
-  const canAsk = !modelsLoading && !modelsError && models.some((item) => item.id === model)
+  const canAsk = !modelsLoading && !modelsError && models.some((item) => item.id === model) && (!league || !!selectedLeague)
 
   useEffect(() => {
     const controller = new AbortController()
     async function loadModels() {
       try {
-        const response = await fetch(`${API_BASE}/models`, { signal: controller.signal })
-        if (!response.ok) throw new Error('Could not load models.')
-        const data = await response.json()
+        const responses = await Promise.all(['models', 'coverage'].map((path) =>
+          fetch(`${API_BASE}/${path}`, { signal: controller.signal })))
+        if (responses.some((response) => !response.ok)) throw new Error('Could not load app options.')
+        const [data, coverage] = await Promise.all(responses.map((response) => response.json()))
         if (!Array.isArray(data.models) || !data.models.length ||
             !data.models.every((item) => typeof item.id === 'string' && typeof item.label === 'string') ||
             !data.models.some((item) => item.id === data.default)) throw new Error('Invalid model list.')
+        if (!Array.isArray(coverage.leagues)) throw new Error('Invalid league list.')
+        setLeagues(coverage.leagues.filter((item) => item.complete_games || item.legacy_games))
         let saved
         try { saved = localStorage.getItem(MODEL_KEY) } catch { /* Storage is optional. */ }
         setModels(data.models)
         setModel(data.models.some((item) => item.id === saved) ? saved : data.default)
       } catch {
-        if (!controller.signal.aborted) setModelsError('Cannot load Gemini models.')
+        if (!controller.signal.aborted) setModelsError('Cannot load models and leagues.')
       } finally {
         if (!controller.signal.aborted) setModelsLoading(false)
       }
@@ -178,6 +194,13 @@ export default function App() {
     if (activeId === id) fresh()
   }
 
+  function chooseLeague(value) {
+    if (pending) return
+    setLeague(value)
+    try { localStorage.setItem(LEAGUE_KEY, value) } catch { /* Storage is optional. */ }
+    fresh()
+  }
+
   // Ask question
   async function ask(text) {
     text = text.trim()
@@ -192,7 +215,7 @@ export default function App() {
       const response = await fetch(`${API_BASE}/ask`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: text, model, history: turns.map((turn) => ({
+        body: JSON.stringify({ question: text, model, league: league || null, history: turns.map((turn) => ({
           question: turn.question, answer: turn.answer.slice(0, 20000),
         })) }),
       })
@@ -203,8 +226,9 @@ export default function App() {
       if (typeof data.answer !== 'string' || !data.answer.trim()) {
         throw new Error('The backend returned an empty answer. Please try again.')
       }
-      const entry = { id: crypto.randomUUID(), conversationId, question: text, answer: data.answer,
-        model: data.model, modelLabel: data.model_label }
+      const entry = { id: crypto.randomUUID(), conversationId, league: league || null, question: text, answer: data.answer,
+        model: data.model, modelLabel: data.model_label,
+        suggestions: Array.isArray(data.suggestions) ? data.suggestions.filter((q) => typeof q === 'string' && q.trim()).slice(0, 3) : [] }
       setHistory((h) => [entry, ...h])
       setQuestion('')
     } catch (e) {
@@ -260,10 +284,8 @@ export default function App() {
                   'history-item ' + (activeId === x.id ? 'selected' : '')
                 }
                 onClick={() => {
+                  chooseLeague(x.league || '')
                   setActiveId(x.id)
-                  setMenu(false)
-                  setError('')
-                  setQuestion('')
                 }}
               >
                 <SpeechBubble />
@@ -313,7 +335,7 @@ export default function App() {
       </aside>
       <main>
         <header>
-          <div>
+          <div className="model-picker sport-picker">
             <button
               className="menu"
               aria-label="Open question history"
@@ -322,6 +344,12 @@ export default function App() {
             >
               ☰
             </button>
+            <label htmlFor="sport">Sport</label>
+            <select id="sport" value={league} disabled={pending || modelsLoading || !!modelsError}
+              onChange={(event) => chooseLeague(event.target.value)}>
+              <option value="">{modelsLoading ? 'Loading leagues…' : 'All sports'}</option>
+              {leagues.map((item) => <option key={item.league_id} value={item.league_id}>{item.name}</option>)}
+            </select>
           </div>
           <div className="model-picker">
             <label htmlFor="gemini-model">Model</label>
@@ -343,7 +371,7 @@ export default function App() {
               </div>
               <h1>
                 Ask a question about
-                <br /> NBA stats!
+                <br /> {selectedLeague?.name || 'sports'} stats!
               </h1>
             </section>
           )}
@@ -361,12 +389,19 @@ export default function App() {
                       {turn.modelLabel && <span>{turn.modelLabel}</span>}
                     </div>
                     <div className="answer-content"><Markdown remarkPlugins={[remarkGfm]} components={markdownComponents} skipHtml>{turn.answer}</Markdown></div>
+                    {Array.isArray(turn.suggestions) && turn.suggestions.length > 0 && (
+                      <section className="follow-ups" aria-label="Suggested follow-up questions">
+                        <span>Follow-up questions</span>
+                        {turn.suggestions.map((text, i) => <button key={i} type="button"
+                          disabled={pending || !canAsk || turns.length >= 100} onClick={() => ask(text)}>{text}</button>)}
+                      </section>
+                    )}
                   </article>
                 </div>
               ))}
               {pending && <div className="chat-turn"><div className="user-message"><span>You</span><p>{pendingQuestion}</p></div>
                 <p role="status">AskNBA is finding your answer…</p></div>}
-              <div ref={bottom} />
+              <div className="conversation-end" ref={bottom} />
             </section>
           )}
           <form
@@ -377,7 +412,7 @@ export default function App() {
             }}
           >
             <label className="sr-only" htmlFor="question">
-              Ask a question about NBA statistics
+              Ask a question about {selectedLeague?.name || 'sports'} statistics
             </label>
             <input
               id="question"
@@ -387,7 +422,7 @@ export default function App() {
               placeholder={
                 active
                   ? 'Ask a follow-up question…'
-                  : 'What do you want to know about the NBA?'
+                  : `What do you want to know about ${selectedLeague?.name || 'sports'}?`
               }
               maxLength={2000}
               disabled={pending}
@@ -421,7 +456,7 @@ export default function App() {
                 <span />
               </div>
               <div className="suggestion-list">
-                {prompts.map(([, text]) => (
+                {suggestions.map((text) => (
                   <button
                     className="suggestion"
                     key={text}
@@ -434,8 +469,8 @@ export default function App() {
               </div>
             </section>
           )}
-          {!active && !pending && (
-            <RecentGames apiBase={API_BASE} onAsk={ask} disabled={pending || !canAsk} />
+          {!active && !pending && !modelsLoading && !modelsError && (!league || selectedLeague) && (
+            <RecentGames key={league} apiBase={API_BASE} league={selectedLeague} onAsk={ask} disabled={pending || !canAsk} />
           )}
         </div>
       </main>

@@ -6,7 +6,9 @@ COPY backend/requirements.txt ./backend/requirements.txt
 RUN pip install --no-cache-dir -r backend/requirements.txt \
     && useradd --uid 10001 --create-home app
 COPY backend/main.py ./backend/main.py
-COPY nba.db ./nba.db
+COPY backend/espn.py ./backend/espn.py
+COPY --chown=app:app nba.db ./nba.db
+RUN chown app:app /app
 USER app
 EXPOSE 8000
 CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]

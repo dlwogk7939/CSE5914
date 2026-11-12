@@ -103,6 +103,8 @@
   font-weight: 400;
   opacity: 0.6;
 }
+.game-team-name, .game-event { min-width: 0; overflow-wrap: anywhere; }
+.game-score { flex-shrink: 0; }
 
 .game-score {
   font-variant-numeric: tabular-nums;

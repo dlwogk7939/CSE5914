@@ -2,3 +2,11 @@
 .env
 .venv
 frontend-dist/
+project_state.md
+scrape.log
+data_backups/
+sports_import*.log
+sports_import.pid
+*.db-wal
+*.db-shm
+*.db.import.lock

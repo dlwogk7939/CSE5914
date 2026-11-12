@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react'
 import './RecentGames.css'
 
-// Shows the most recent games in nba.db with final scores and each game's top scorer.
-// Clicking a game asks AskNBA about it.
-export default function RecentGames({ apiBase, onAsk, disabled }) {
+// Shows loaded results for the selected league; clicking one starts a question.
+export default function RecentGames({ apiBase, league, onAsk, disabled }) {
   const [games, setGames] = useState([])
   const [status, setStatus] = useState('loading') // loading | ready | error
   const [attempt, setAttempt] = useState(0)
@@ -12,7 +11,7 @@ export default function RecentGames({ apiBase, onAsk, disabled }) {
     const controller = new AbortController()
     async function loadGames() {
       try {
-        const response = await fetch(`${apiBase}/recent-games?limit=8`, { signal: controller.signal })
+        const response = await fetch(`${apiBase}/recent-games?limit=8&league=${encodeURIComponent(league?.league_id || 'nba')}`, { signal: controller.signal })
         if (!response.ok) throw new Error('Could not load recent games.')
         const data = await response.json()
         if (!Array.isArray(data.games)) throw new Error('Invalid recent games response.')
@@ -24,15 +23,15 @@ export default function RecentGames({ apiBase, onAsk, disabled }) {
     }
     loadGames()
     return () => controller.abort()
-  }, [apiBase, attempt])
+  }, [apiBase, league?.league_id, attempt])
 
   if (status === 'ready' && !games.length) return null
 
   return (
-    <section className="recent-games" aria-label="Recent games">
+    <section className="recent-games" aria-label="Recent results">
       <div className="recent-games-heading">
         <span />
-        Recent games
+        Recent {league?.name || 'NBA'} results
         <span />
       </div>
 
@@ -56,11 +55,27 @@ export default function RecentGames({ apiBase, onAsk, disabled }) {
                 className="game-card"
                 disabled={disabled}
                 title={`Ask about ${gameTitle(game)}`}
-                onClick={() => onAsk(gameQuestion(game))}
+                onClick={() => onAsk(gameQuestion(game, league?.name || 'NBA'))}
               >
                 <span className="game-date">{formatDate(game.date)}</span>
-                <TeamRow team={game.away} won={isWinner(game.away, game.home)} />
-                <TeamRow team={game.home} won={isWinner(game.home, game.away)} home />
+                {game.kind === 'event' ? (
+                  <>
+                    <strong className="game-event">{gameTitle(game)}</strong>
+                    {game.participants.find((p) => p.winner === 1) && <span className="game-leader">
+                      Winner: {game.participants.find((p) => p.winner === 1).name}
+                    </span>}
+                  </>
+                ) : game.kind === 'match' ? (
+                  <>
+                    {game.participants.map((p) => <TeamRow key={p.id} team={{ name: p.name, score: p.winner === 1 ? 'Won' : null }} won={p.winner === 1} />)}
+                    <span className="game-leader">{game.round_name || game.event_name}</span>
+                  </>
+                ) : (
+                  <>
+                    <TeamRow team={game.away} won={isWinner(game.away, game.home)} />
+                    <TeamRow team={game.home} won={isWinner(game.home, game.away)} home />
+                  </>
+                )}
                 {game.top_performer && (
                   <span className="game-leader">
                     <strong>{game.top_performer.name}</strong>{' '}
@@ -80,10 +95,10 @@ function TeamRow({ team, won, home = false }) {
   return (
     <span className={won ? 'game-team won' : 'game-team'}>
       <span className="game-team-name" title={team.name}>
-        {team.abbreviation ?? '—'}
+        {team.abbreviation || team.name || '—'}
         {home && <small> home</small>}
       </span>
-      <span className="game-score">{team.score ?? '—'}</span>
+      <span className="game-score">{team.score ?? ''}</span>
     </span>
   )
 }
@@ -93,21 +108,23 @@ function isWinner(team, opponent) {
 }
 
 function gameTitle(game) {
+  if (game.kind === 'event') return [game.event_name, game.competition_type !== 'total' && game.competition_type?.replaceAll('_', ' ')].filter(Boolean).join(' · ')
+  if (game.kind === 'match') return game.participants.map((p) => p.name).join(' vs ')
   return `${game.away.name} at ${game.home.name}`
 }
 
-function gameQuestion(game) {
-  return `Show the box score for the ${gameTitle(game)} game on ${formatDate(game.date, true)}.`
+function gameQuestion(game, league) {
+  const phase = game.kind === 'team' && game.phase_name ? ` (${game.phase_name})` : ''
+  return `Show the ${game.kind === 'event' || game.kind === 'match' ? 'results' : 'box score'} for ${league}${phase}: ${gameTitle(game)} on ${game.date} (UTC).`
 }
 
 // Dates are stored in UTC ("2026-04-13T00:30Z"); show them in the viewer's time zone.
-function formatDate(value, withYear = false) {
+function formatDate(value) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
   return date.toLocaleDateString(undefined, {
-    weekday: withYear ? undefined : 'short',
+    weekday: 'short',
     month: 'short',
     day: 'numeric',
-    year: withYear ? 'numeric' : undefined,
   })
 }
